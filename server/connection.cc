@@ -253,7 +253,7 @@ struct IWConnection {
     RemoteMemory remote_memory;
     instrew::Cache cache;
 
-    std::filesystem::path path;
+    std::filesystem::path dumppath;
 
     IWConnection(const struct IWFunctions* fns, InstrewConfig& cfg, Conn& conn)
             : fns(fns), cfg(cfg), conn(conn), remote_memory(conn) {}
@@ -264,10 +264,19 @@ private:
             return nullptr;
         std::stringstream debug_out1_name;
         debug_out1_name << std::hex << "func_" << addr << ".elf";
-        return std::fopen((path / debug_out1_name.str()).c_str(), "wb");
+        return std::fopen((dumppath / debug_out1_name.str()).c_str(), "wb");
     }
 
 public:
+    void ArgsDump(size_t user_argc, const char* const* user_args) {
+        std::stringstream user_args_filename;
+        user_args_filename << std::hex << "user_args";
+        FILE* fp = std::fopen((dumppath / user_args_filename.str()).c_str(), "wb");
+        for (size_t i = 0; i < user_argc; i++) {
+            fprintf(fp, "%s\n", user_args[i]);
+        }
+    }
+
     bool CacheProbe(uint64_t addr, const uint8_t* hash) {
         (void) addr;
         auto res = cache.Get(hash);
@@ -302,18 +311,21 @@ public:
         }
         iwsc = conn.Read<IWServerConfig>();
 
-        if (cfg.dumpobjdir != "") {
-            path = cfg.dumpobjdir ;
+        if (cfg.dumpdir != "") {
+            dumppath = cfg.dumpdir ;
         }
         else {
             passwd *pw = getpwuid(getuid());
-            path = pw->pw_dir;
-            path /= ".dumpobj";
-            path /= "instrew";
+            dumppath = pw->pw_dir;
+            dumppath /= ".dump";
+            dumppath /= "instrew";
         }
         std::error_code ec;
-        if (std::filesystem::create_directories(path, ec) || ec)
+        if (std::filesystem::create_directories(dumppath, ec) || ec)
             return 1;
+
+        if (cfg.dumpargs)
+            ArgsDump(cfg.user_argc, cfg.user_args);
 
         // In mode 0, we need to respond with a client config.
         need_iwcc = iwsc.tsc_server_mode == 0;
