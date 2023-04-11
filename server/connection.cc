@@ -273,7 +273,7 @@ public:
         user_args_filename << std::hex << "user_args";
         FILE* fp = std::fopen((dumppath / user_args_filename.str()).c_str(), "wb");
         for (size_t i = 0; i < user_argc; i++) {
-            fprintf(fp, "%s\n", user_args[i]);
+            fprintf(fp, "%s ", user_args[i]);
         }
     }
 
