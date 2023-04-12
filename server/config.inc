@@ -1,10 +1,11 @@
 INSTREW_OPT(int, targetopt, 3)
-INSTREW_OPT(int, callconv, 1) // default to fast cc
+INSTREW_OPT(int, callconv, 0) // default to fast cc
 INSTREW_OPT(std::string, tool, "")
 INSTREW_OPT(bool, extrainstcombine, true)
 INSTREW_OPT(int, perf, 0)
-INSTREW_OPT(bool, dumpobj, false)
-INSTREW_OPT(std::string, dumpobjdir, "")
+INSTREW_OPT(std::string, dumpdir, "dump")
+INSTREW_OPT(bool, dumpobj, true)
+INSTREW_OPT(bool, dumpargs, true)
 INSTREW_OPT(int, dumpir, false)
 INSTREW_OPT(bool, profile, false)
 INSTREW_OPT(bool, timepasses, false)

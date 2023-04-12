@@ -1,4 +1,3 @@
-
 #include <common.h>
 
 #include <dispatch.h>
@@ -70,10 +69,12 @@ resolve_func(struct CpuState* cpu_state, uintptr_t addr,
         void* obj_base;
         size_t obj_size;
         retval = translator_get(&state->translator, addr, &obj_base, &obj_size);
+        
         if (retval < 0)
             goto error;
 
         retval = rtld_add_object(&state->rtld, obj_base, obj_size, addr);
+
         if (retval < 0)
             goto error;
         retval = rtld_resolve(&state->rtld, addr, &func);
@@ -115,7 +116,6 @@ void dispatch_cdecl(uint64_t*);
 
 inline void dispatch_cdecl(uint64_t* cpu_regs) {
     struct CpuState* cpu_state = CPU_STATE_FROM_REGS(cpu_regs);
-
     uintptr_t addr = cpu_regs[0];
     uintptr_t hash = QUICK_TLB_HASH(addr);
 
@@ -130,8 +130,9 @@ inline void dispatch_cdecl(uint64_t* cpu_regs) {
 
 static void
 dispatch_cdecl_loop(uint64_t* cpu_regs) {
-    while (true)
+    while (true) {
         dispatch_cdecl(cpu_regs);
+    }
 }
 
 #ifdef __x86_64__

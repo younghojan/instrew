@@ -16,9 +16,9 @@ if host_machine.cpu_family() == 'aarch64'
   ]
 endif
 
-client_c_args = ['-D_GNU_SOURCE', '-nostdlib', '-fno-builtin',
+client_c_args = ['-D_GNU_SOURCE', '-fno-builtin',
                  '-fno-stack-protector', '-fomit-frame-pointer', '-fPIC']
-client_link_args = ['-nostdlib', '-nostartfiles', '-lgcc']
+client_link_args = ['-nostartfiles', '-lgcc']
 
 cc = meson.get_compiler('c')
 if cc.has_argument('-static-pie')
@@ -41,6 +41,7 @@ client = executable('instrew-client', sources,
                     include_directories: include_directories('.', '../shared'),
                     c_args: client_c_args,
                     link_args: client_link_args,
-                    install: true)
+                    install: true,
+                    dependencies: [criu])
 
 test('mathlib', executable('test_mathlib', 'math.c', c_args: ['-DTEST', '-fno-builtin']), protocol: 'tap')
