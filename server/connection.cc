@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <cstring>
 #include <pwd.h>
+#include <openssl/sha.h>
 
 #define PATH_MAX 4096
 
@@ -70,7 +71,7 @@ namespace
             : file_rd(file_rd), file_wr(file_wr), recv_hdr{} {}
 
     public:
-        static Conn CreateFork(char *argv0, size_t uargc, const char *const *uargv, const bool debug);
+        static Conn CreateFork(char *argv0, size_t uargc, const char *const *uargv, const bool debug, const std::string dumpdir, const std::string rerunner_path);
 
         Msg::Id RecvMsg()
         {
@@ -135,8 +136,71 @@ namespace
         }
     };
 
-    Conn Conn::CreateFork(char *argv0, size_t uargc, const char *const *uargv, const bool debug)
-    {
+    Conn Conn::CreateFork(char *argv0, size_t uargc, const char *const *uargv, const bool debug, const std::string dumpdir, const std::string rerunner_path)
+    {   
+        if (std::filesystem::exists(rerunner_path)) {
+            // Check if this guset ISA ELF is the same as the previous one
+
+            if (std::filesystem::exists(dumpdir) && std::filesystem::is_directory(dumpdir)) {
+                std::string fingerprint_path = dumpdir[dumpdir.length() - 1] == '/' ? dumpdir + "fingerprint" : dumpdir + "/fingerprint";
+                std::string user_args_path = dumpdir[dumpdir.length() - 1] == '/' ? dumpdir + "user_args" : dumpdir + "/user_args";
+
+                if (std::filesystem::exists(fingerprint_path) && std::filesystem::is_regular_file(fingerprint_path) && 
+                        std::filesystem::exists(user_args_path) && std::filesystem::is_regular_file(user_args_path)) {
+                    std::ifstream fingerprint_file(fingerprint_path);
+                    std::ifstream user_args_file(user_args_path);
+                    if (fingerprint_file.is_open() && user_args_file.is_open()) {
+                        std::string fingerprint;
+                        std::getline(fingerprint_file, fingerprint);
+                        fingerprint_file.close();
+
+                        std::string line;
+                        std::getline(user_args_file, line);
+                        std::istringstream iss(line);
+                        std::string substring;
+                        std::vector<std::string> args;
+                        while (iss >> substring) {
+                            args.emplace_back(substring);
+                        }
+
+                        int flag = 0;
+                        if (std::stoi(args[0]) + 1 == uargc) { 
+                            for (int i = 1; i < static_cast<int>(args.size()); i++) {   // Read in the parameters of the last execution
+                                if (args[i].compare(uargv[i - 1]) == 0) {   // same as this time
+                                    flag = 1;
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            if (flag) {
+                                std::ifstream file(uargv[0], std::ios::binary);
+                                SHA256_CTX ctx;
+                                SHA256_Init(&ctx);
+                                char buffer[BUFSIZ];
+                                while (file.read(buffer, sizeof(buffer)) || file.gcount()) {
+                                    SHA256_Update(&ctx, buffer, file.gcount());
+                                }
+                                unsigned char hash[SHA256_DIGEST_LENGTH];
+                                SHA256_Final(hash, &ctx);
+
+                                std::string result;
+                                for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+                                    result += static_cast<char>(hash[i]);
+                                }
+
+                                if (result.compare(fingerprint) == 0) {
+                                    std::string cmd = rerunner_path + " " + dumpdir;
+                                    system(cmd.c_str());
+                                    exit(0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         int pipes[4];
         int ret = pipe2(&pipes[0], 0);
         if (ret < 0)
@@ -155,7 +219,6 @@ namespace
         std::string client_config;
         for (; raw_fds; raw_fds >>= 3)
             client_config.append(1, '0' + (raw_fds & 7));
-
         std::vector<const char *> exec_args;
         exec_args.reserve(uargc + 3);
         exec_args.push_back(argv0);
@@ -317,6 +380,26 @@ public:
         for (size_t i = 0; i < user_argc; i++) {
             fprintf(fp, "%s ", user_args[i]);
         }
+
+        std::stringstream fingerprint_filename;
+        fingerprint_filename << std::hex << "fingerprint";
+        fp = std::fopen((dumppath / fingerprint_filename.str()).c_str(), "wb");
+
+        std::ifstream file(user_args[0], std::ios::binary);
+        SHA256_CTX ctx;
+        SHA256_Init(&ctx);
+        char buffer[BUFSIZ];
+        while (file.read(buffer, sizeof(buffer)) || file.gcount()) {
+            SHA256_Update(&ctx, buffer, file.gcount());
+        }
+        unsigned char hash[SHA256_DIGEST_LENGTH];
+        SHA256_Final(hash, &ctx);
+
+        std::string fingerprint;
+        for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+            fingerprint += static_cast<char>(hash[i]);
+        }
+        fprintf(fp, "%s", fingerprint.c_str());
     }
 
     bool CacheProbe(uint64_t addr, const uint8_t *hash)
@@ -436,7 +519,7 @@ void iw_sendobj(IWConnection *iwc, uintptr_t addr, const void *data,
 int iw_run_server(const struct IWFunctions *fns, int argc, char **argv)
 {
     InstrewConfig cfg(argc - 1, argv + 1);
-    Conn conn = Conn::CreateFork(argv[0], cfg.user_argc, cfg.user_args, cfg.debug);
+    Conn conn = Conn::CreateFork(argv[0], cfg.user_argc, cfg.user_args, cfg.debug, cfg.dumpdir, cfg.rerunner);
     IWConnection iwc{fns, cfg, conn};
     return iwc.Run();
 }
