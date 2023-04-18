@@ -24,6 +24,6 @@ client_cp = custom_target('cp-client', output: 'instrew-client', input: client,
 
 executable('instrew', sources, client_bytes, client_cp,
            include_directories: include_directories('.', '../shared'),
-           dependencies: [librellume, fadec, frvdec, farmdec, libllvm, libcrypto, instrew_api],
+           dependencies: [librellume, fadec, frvdec, farmdec, libllvm, libcrypto, instrew_api, sqlite3],
            link_args: ['-ldl'],
            install: true)

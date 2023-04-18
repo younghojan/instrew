@@ -21,7 +21,8 @@
 #include <fcntl.h>
 #include <cstring>
 #include <pwd.h>
-#include <openssl/sha.h>
+#include <openssl/md5.h>
+#include <sqlite3.h>
 
 #define PATH_MAX 4096
 
@@ -59,6 +60,131 @@ namespace
         } __attribute__((packed));
     }
 
+    class SQLiteDatabase
+    {
+    public:
+        SQLiteDatabase(const std::string &dbPath) : dbPath_(dbPath), db_(nullptr)
+        {
+            int rc = sqlite3_open(dbPath_.c_str(), &db_);
+            if (rc != SQLITE_OK)
+            {
+                std::cerr << "Database does not exist. Creating..." << std::endl;
+
+                rc = sqlite3_open(dbPath_.c_str(), &db_);
+                if (rc != SQLITE_OK)
+                {
+                    std::cerr << "Error creating database: " << sqlite3_errmsg(db_) << std::endl;
+                    sqlite3_close(db_);
+                    db_ = nullptr;
+                }
+                else
+                {
+                    std::cout << "Database created successfully." << std::endl;
+                }
+            }
+
+            // Check if table 'programs' exists, and create it if not
+            if (tableExists("programs") == false)
+            {
+                std::cout << "Table 'programs' does not exist. Creating..." << std::endl;
+                std::string createTableSQL = "CREATE TABLE IF NOT EXISTS programs (id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT, dir_path TEXT);";
+                if (executeSQL(createTableSQL))
+                {
+                    std::cout << "Table 'programs' created successfully." << std::endl;
+                }
+                else
+                {
+                    std::cerr << "Error creating table 'programs': " << sqlite3_errmsg(db_) << std::endl;
+                }
+            }
+        }
+
+        ~SQLiteDatabase()
+        {
+            if (db_ != nullptr)
+            {
+                sqlite3_close(db_);
+            }
+        }
+
+        bool executeSQL(const std::string &sql)
+        {
+            if (db_ == nullptr)
+            {
+                std::cerr << "Error: Database is not open." << std::endl;
+                return false;
+            }
+
+            char *errMsg = nullptr;
+            int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &errMsg);
+            if (rc != SQLITE_OK)
+            {
+                std::cerr << "Error executing SQL: " << errMsg << std::endl;
+                sqlite3_free(errMsg);
+                return false;
+            }
+
+            return true;
+        }
+
+        bool executeSelect(const std::string &sql, std::vector<std::vector<std::string>> &results)
+        {
+            if (db_ == nullptr)
+            {
+                std::cerr << "Error: Database is not open." << std::endl;
+                return false;
+            }
+
+            sqlite3_stmt *stmt = nullptr;
+            int rc = sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
+            if (rc != SQLITE_OK)
+            {
+                std::cerr << "Error preparing SQL statement: " << sqlite3_errmsg(db_) << std::endl;
+                sqlite3_finalize(stmt);
+                return false;
+            }
+
+            int cols = sqlite3_column_count(stmt);
+            results.clear();
+
+            while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
+            {
+                std::vector<std::string> row;
+                for (int col = 0; col < cols; col++)
+                {
+                    const unsigned char *value = sqlite3_column_text(stmt, col);
+                    row.push_back(std::string(reinterpret_cast<const char *>(value)));
+                }
+                results.push_back(row);
+            }
+
+            sqlite3_finalize(stmt);
+
+            if (rc != SQLITE_DONE)
+            {
+                std::cerr << "Error executing SQL: " << sqlite3_errmsg(db_) << std::endl;
+                return false;
+            }
+
+            return true;
+        }
+
+    private:
+        std::string dbPath_;
+        sqlite3 *db_;
+
+        bool tableExists(const std::string &tableName)
+        {
+            std::string checkTableSQL = "SELECT name FROM sqlite_master WHERE type='table' AND name='" + tableName + "';";
+            std::vector<std::vector<std::string>> results;
+            if (executeSelect(checkTableSQL, results) && results.size() > 0)
+            {
+                return true;
+            }
+            return false;
+        }
+    };
+
     class Conn
     {
     private:
@@ -71,7 +197,8 @@ namespace
             : file_rd(file_rd), file_wr(file_wr), recv_hdr{} {}
 
     public:
-        static Conn CreateFork(char *argv0, size_t uargc, const char *const *uargv, const bool debug, const std::string dumpdir, const std::string rerunner_path);
+        static Conn CreateFork(char *argv0, size_t uargc, const char *const *uargv, const bool debug,
+                               const std::string rerunner_path, SQLiteDatabase db, std::string &dir_path);
 
         Msg::Id RecvMsg()
         {
@@ -136,68 +263,80 @@ namespace
         }
     };
 
-    Conn Conn::CreateFork(char *argv0, size_t uargc, const char *const *uargv, const bool debug, const std::string dumpdir, const std::string rerunner_path)
-    {   
-        if (std::filesystem::exists(rerunner_path)) {
-            // Check if this guset ISA ELF is the same as the previous one
+    Conn Conn::CreateFork(char *argv0, size_t uargc, const char *const *uargv, const bool debug,
+                          const std::string rerunner_path, SQLiteDatabase db, std::string &dir_path)
+    {
+        if (std::filesystem::exists(rerunner_path)) // if rerunner exists
+        {
+            // compute MD5
+            std::ifstream file(uargv[0], std::ios::binary);
+            MD5_CTX ctx;
+            MD5_Init(&ctx);
+            char buffer[BUFSIZ];
+            while (file.read(buffer, sizeof(buffer)) || file.gcount())
+            {
+                MD5_Update(&ctx, buffer, file.gcount());
+            }
+            unsigned char hash[MD5_DIGEST_LENGTH];
+            MD5_Final(hash, &ctx);
 
-            if (std::filesystem::exists(dumpdir) && std::filesystem::is_directory(dumpdir)) {
-                std::string fingerprint_path = dumpdir[dumpdir.length() - 1] == '/' ? dumpdir + "fingerprint" : dumpdir + "/fingerprint";
-                std::string user_args_path = dumpdir[dumpdir.length() - 1] == '/' ? dumpdir + "user_args" : dumpdir + "/user_args";
+            std::stringstream ss;
+            ss << std::hex << std::setfill('0');
+            for (int i = 0; i < MD5_DIGEST_LENGTH; ++i)
+            {
+                ss << std::setw(2) << static_cast<int>(hash[i]);
+            }
+            std::string MD5 = ss.str();
 
-                if (std::filesystem::exists(fingerprint_path) && std::filesystem::is_regular_file(fingerprint_path) && 
-                        std::filesystem::exists(user_args_path) && std::filesystem::is_regular_file(user_args_path)) {
-                    std::ifstream fingerprint_file(fingerprint_path);
-                    std::ifstream user_args_file(user_args_path);
-                    if (fingerprint_file.is_open() && user_args_file.is_open()) {
-                        std::string fingerprint;
-                        std::getline(fingerprint_file, fingerprint);
-                        fingerprint_file.close();
+            // check if translated before
+            std::string selectSQL = "SELECT dir_path FROM programs WHERE hash = '" + MD5 + "';";
+            std::vector<std::vector<std::string>> results;
+            if (db.executeSelect(selectSQL, results) && results.size())
+            {
+                // we want arguments of last execution
+                dir_path = results[0][0];
+                std::string user_args_path = dir_path[dir_path.length() - 1] == '/' ? dir_path + "user_args" : dir_path + "/user_args";
+                std::ifstream user_args_file(user_args_path);
+                std::vector<std::string> args;
+                std::string line;
+                std::getline(user_args_file, line);
+                std::istringstream iss(line);
+                std::string substring;
+                while (iss >> substring)
+                {
+                    args.emplace_back(substring);
+                }
 
-                        std::string line;
-                        std::getline(user_args_file, line);
-                        std::istringstream iss(line);
-                        std::string substring;
-                        std::vector<std::string> args;
-                        while (iss >> substring) {
-                            args.emplace_back(substring);
+                int flag = 0;
+                if (std::stoi(args[0]) + 1 == uargc) // same argc
+                {
+                    for (int i = 1; i < static_cast<int>(args.size()); i++) // Read in the parameters of the last execution
+                    {
+                        if (args[i].compare(uargv[i - 1]) == 0) // same as this time
+                        {
+                            flag = 1;
                         }
-
-                        int flag = 0;
-                        if (std::stoi(args[0]) + 1 == uargc) { 
-                            for (int i = 1; i < static_cast<int>(args.size()); i++) {   // Read in the parameters of the last execution
-                                if (args[i].compare(uargv[i - 1]) == 0) {   // same as this time
-                                    flag = 1;
-                                } else {
-                                    break;
-                                }
-                            }
-
-                            if (flag) {
-                                std::ifstream file(uargv[0], std::ios::binary);
-                                SHA256_CTX ctx;
-                                SHA256_Init(&ctx);
-                                char buffer[BUFSIZ];
-                                while (file.read(buffer, sizeof(buffer)) || file.gcount()) {
-                                    SHA256_Update(&ctx, buffer, file.gcount());
-                                }
-                                unsigned char hash[SHA256_DIGEST_LENGTH];
-                                SHA256_Final(hash, &ctx);
-
-                                std::string result;
-                                for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
-                                    result += static_cast<char>(hash[i]);
-                                }
-
-                                if (result.compare(fingerprint) == 0) {
-                                    std::string cmd = rerunner_path + " " + dumpdir;
-                                    system(cmd.c_str());
-                                    exit(0);
-                                }
-                            }
+                        else
+                        {
+                            break;
                         }
                     }
+
+                    if (flag) // correct args
+                    {
+                        std::string cmd = rerunner_path + " " + dir_path;
+                        system(cmd.c_str());
+                        exit(0);
+                    }
                 }
+            }
+            else
+            {
+                dir_path = rerunner_path;
+                dir_path.erase(dir_path.find_last_of('/') + 1);
+                dir_path += MD5;
+                std::error_code ec;
+                std::filesystem::create_directories(dir_path, ec);
             }
         }
 
@@ -228,30 +367,37 @@ namespace
         exec_args.push_back(nullptr);
 
         int memfd;
-        if (debug) {
+        if (debug)
+        {
             char client_path[PATH_MAX] = "";
             readlink("/proc/self/exe", client_path, sizeof(client_path));
             strcat(client_path, "-client");
             memfd = open(client_path, O_RDONLY);
-            if (memfd < 0) {
+            if (memfd < 0)
+            {
                 perror("open");
                 std::exit(1);
             }
-        } else {
+        }
+        else
+        {
             static const unsigned char instrew_stub[] = {
-    #include "client.inc"
+#include "client.inc"
             };
 
             memfd = memfd_create("instrew_stub", MFD_CLOEXEC);
-            if (memfd < 0) {
+            if (memfd < 0)
+            {
                 perror("memfd_create");
                 std::exit(1);
             }
             size_t written = 0;
             size_t total = sizeof(instrew_stub);
-            while (written < total) {
+            while (written < total)
+            {
                 auto wres = write(memfd, instrew_stub + written, total - written);
-                if (wres < 0) {
+                if (wres < 0)
+                {
                     perror("write");
                     std::exit(1);
                 }
@@ -259,16 +405,16 @@ namespace
             }
         }
 
-        pid_t forkres = fork(); 
+        pid_t forkres = fork();
         if (forkres < 0)
         {
             perror("fork");
             std::exit(1);
         }
         else if (forkres > 0)
-        {                    
-            close(pipes[1]); 
-            close(pipes[2]); 
+        {
+            close(pipes[1]);
+            close(pipes[2]);
 
             fexecve(memfd, const_cast<char *const *>(&exec_args[0]), environ);
             perror("fexecve");
@@ -340,7 +486,6 @@ namespace
             return bytes_written;
         }
     };
-
 } // end namespace
 
 struct IWConnection
@@ -356,50 +501,30 @@ struct IWConnection
     RemoteMemory remote_memory;
     instrew::Cache cache;
 
-    std::filesystem::path dumppath;
+    std::string dir_path;
 
-    IWConnection(const struct IWFunctions *fns, InstrewConfig &cfg, Conn &conn)
-        : fns(fns), cfg(cfg), conn(conn), remote_memory(conn) {}
+    IWConnection(const struct IWFunctions *fns, InstrewConfig &cfg, Conn &conn, const std::string dir_path)
+        : fns(fns), cfg(cfg), conn(conn), remote_memory(conn), dir_path(dir_path) {}
 
 private:
     FILE *OpenObjDump(uint64_t addr)
     {
-        if (!cfg.dumpobj)
-            return nullptr;
         std::stringstream debug_out1_name;
-        debug_out1_name << std::hex << "func_" << addr << ".elf";
-        return std::fopen((dumppath / debug_out1_name.str()).c_str(), "wb");
+        debug_out1_name << std::hex << addr;
+        return std::fopen((dir_path + "/" + debug_out1_name.str()).c_str(), "wb");
     }
 
 public:
-    void ArgsDump(size_t user_argc, const char* const* user_args) {
+    void ArgsDump(size_t user_argc, const char *const *user_args)
+    {
         std::stringstream user_args_filename;
         user_args_filename << std::hex << "user_args";
-        FILE* fp = std::fopen((dumppath / user_args_filename.str()).c_str(), "wb");
+        FILE *fp = std::fopen((dir_path + "/" + user_args_filename.str()).c_str(), "wb");
         fprintf(fp, "%ld ", user_argc - 1);
-        for (size_t i = 0; i < user_argc; i++) {
+        for (size_t i = 0; i < user_argc; i++)
+        {
             fprintf(fp, "%s ", user_args[i]);
         }
-
-        std::stringstream fingerprint_filename;
-        fingerprint_filename << std::hex << "fingerprint";
-        fp = std::fopen((dumppath / fingerprint_filename.str()).c_str(), "wb");
-
-        std::ifstream file(user_args[0], std::ios::binary);
-        SHA256_CTX ctx;
-        SHA256_Init(&ctx);
-        char buffer[BUFSIZ];
-        while (file.read(buffer, sizeof(buffer)) || file.gcount()) {
-            SHA256_Update(&ctx, buffer, file.gcount());
-        }
-        unsigned char hash[SHA256_DIGEST_LENGTH];
-        SHA256_Final(hash, &ctx);
-
-        std::string fingerprint;
-        for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
-            fingerprint += static_cast<char>(hash[i]);
-        }
-        fprintf(fp, "%s", fingerprint.c_str());
     }
 
     bool CacheProbe(uint64_t addr, const uint8_t *hash)
@@ -442,21 +567,7 @@ public:
         }
         iwsc = conn.Read<IWServerConfig>();
 
-        if (cfg.dumpdir != "") {
-            dumppath = cfg.dumpdir ;
-        }
-        else {
-            passwd *pw = getpwuid(getuid());
-            dumppath = pw->pw_dir;
-            dumppath /= ".dump";
-            dumppath /= "instrew";
-        }
-        std::error_code ec;
-        if (std::filesystem::create_directories(dumppath, ec) || ec)
-            return 1;
-
-        if (cfg.dumpargs)
-            ArgsDump(cfg.user_argc, cfg.user_args);
+        ArgsDump(cfg.user_argc, cfg.user_args);
 
         // In mode 0, we need to respond with a client config.
         need_iwcc = iwsc.tsc_server_mode == 0;
@@ -519,7 +630,9 @@ void iw_sendobj(IWConnection *iwc, uintptr_t addr, const void *data,
 int iw_run_server(const struct IWFunctions *fns, int argc, char **argv)
 {
     InstrewConfig cfg(argc - 1, argv + 1);
-    Conn conn = Conn::CreateFork(argv[0], cfg.user_argc, cfg.user_args, cfg.debug, cfg.dumpdir, cfg.rerunner);
-    IWConnection iwc{fns, cfg, conn};
+    SQLiteDatabase db("md5.db");
+    std::string dir_path;
+    Conn conn = Conn::CreateFork(argv[0], cfg.user_argc, cfg.user_args, cfg.debug, cfg.rerunner, db, dir_path);
+    IWConnection iwc{fns, cfg, conn, dir_path};
     return iwc.Run();
 }

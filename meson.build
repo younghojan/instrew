@@ -54,7 +54,7 @@ farmdec = dependency('farmdec', static: true,
                      default_options: ['warning_level=0'],
                      include_type: 'system')
 
-criu = dependency('criu', static: true)
+sqlite3 = dependency('sqlite3')
 
 rellume = subproject('rellume')
 librellume = rellume.get_variable('librellume')
