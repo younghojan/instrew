@@ -169,6 +169,18 @@ namespace
             return true;
         }
 
+        bool executeInsert(const std::string &hash, const std::string &dirPath)
+        {
+            if (db_ == nullptr)
+            {
+                std::cerr << "Error: Database is not open." << std::endl;
+                return false;
+            }
+
+            std::string insertSQL = "INSERT INTO programs (hash, dir_path) VALUES ('" + hash + "', '" + dirPath + "');";
+            return executeSQL(insertSQL);
+        }
+
     private:
         std::string dbPath_;
         sqlite3 *db_;
@@ -308,7 +320,7 @@ namespace
                 }
 
                 int flag = 0;
-                if (std::stoi(args[0]) + 1 == uargc) // same argc
+                if (static_cast<size_t>(std::stoi(args[0]) + 1) == uargc) // same argc
                 {
                     for (int i = 1; i < static_cast<int>(args.size()); i++) // Read in the parameters of the last execution
                     {
@@ -324,6 +336,7 @@ namespace
 
                     if (flag) // correct args
                     {
+                        std::cout << "Instrew Rerunner taking control..." << std::endl;
                         std::string cmd = rerunner_path + " " + dir_path;
                         system(cmd.c_str());
                         exit(0);
@@ -336,7 +349,17 @@ namespace
                 dir_path.erase(dir_path.find_last_of('/') + 1);
                 dir_path += MD5;
                 std::error_code ec;
-                std::filesystem::create_directories(dir_path, ec);
+                if (!std::filesystem::create_directories(dir_path, ec))
+                {
+                    std::cerr << "Error creating directory " << dir_path << ": " << ec.message() << std::endl;
+                    std::exit(1);
+                }
+
+                if (!db.executeInsert(MD5, dir_path))
+                {
+                    std::cerr << "Error Inserting into table programs " << std::endl;
+                    std::exit(1);
+                }
             }
         }
 
